@@ -59,12 +59,7 @@ class SanaModulatedNorm(nn.Module):
 
 
 class GLUMBConv(nn.Module):
-    """Gated Linear Unit with Multi-Branch Convolution.
-
-    Matches the HuggingFace Diffusers implementation: all spatial ops use
-    Conv2d, and gating is applied after the depthwise conv (not before).
-    The caller reshapes between (B, S, C) and (B, C, H, W) as needed.
-    """
+    """Gated Linear Unit with Multi-Branch Convolution."""
 
     def __init__(self, in_channels, out_channels, expand_ratio=2.5):
         super().__init__()
@@ -92,14 +87,7 @@ class GLUMBConv(nn.Module):
 
 
 class SanaLinearAttention(nn.Module):
-    """Linear attention with O(N*D^2) complexity instead of O(N^2*D).
-
-    Uses the kernel trick: ReLU(Q) @ (ReLU(K)^T @ V) avoids materializing
-    the full N x N attention matrix. This is the core efficiency trick that
-    enables SANA to generate high-resolution images without quadratic cost.
-
-    The normalizer Q @ sum(K) prevents attention weights from diverging.
-    """
+    """Linear attention with O(N*D^2) complexity using ReLU kernel trick."""
 
     def __init__(self, query_dim, num_heads, head_dim, qk_norm_dim, bias=False):
         super().__init__()
@@ -237,6 +225,10 @@ class SanaTransformerBlock(nn.Module):
         width,
         encoder_attention_mask=None,
     ):
+        # Input validation - fail fast
+        if encoder_hidden_states is None:
+            raise ValueError("encoder_hidden_states is required for SANA forward pass")
+
         batch_size = hidden_states.shape[0]
 
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
