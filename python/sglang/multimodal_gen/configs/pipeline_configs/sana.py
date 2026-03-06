@@ -34,6 +34,16 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
 )
 
 
+def _get_default_precision() -> str:
+    """Get optimal precision based on CUDA capability."""
+    if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        return "bf16"
+    elif torch.cuda.is_available():
+        return "fp16"
+    else:
+        return "fp32"
+
+
 def sana_postprocess_text(outputs: BaseEncoderOutput, _text_inputs) -> torch.Tensor:
     # SANA uses the final hidden state from Gemma2 directly as text conditioning.
     # No intermediate-layer extraction or masking needed (unlike QwenImage/ZImage).
@@ -53,7 +63,7 @@ class SanaPipelineConfig(SpatialImagePipelineConfig):
     # DC-AE does not support tiling or SP VAE decode yet.
     vae_tiling: bool = False
     vae_sp: bool = False
-    vae_precision: str = "bf16"
+    vae_precision: str = field(default_factory=_get_default_precision)
 
     dit_config: DiTConfig = field(default_factory=SanaConfig)
     vae_config: VAEConfig = field(default_factory=SanaVAEConfig)
@@ -63,7 +73,9 @@ class SanaPipelineConfig(SpatialImagePipelineConfig):
         default_factory=lambda: (Gemma2Config(),)
     )
 
-    text_encoder_precisions: tuple[str, ...] = field(default_factory=lambda: ("bf16",))
+    text_encoder_precisions: tuple[str, ...] = field(
+        default_factory=lambda: (_get_default_precision(),)
+    )
 
     preprocess_text_funcs: tuple[Callable[[str], str], ...] = field(
         default_factory=lambda: (preprocess_text,),
@@ -90,5 +102,5 @@ class SanaPipelineConfig(SpatialImagePipelineConfig):
     def get_neg_prompt_embeds(self, batch):
         return batch.negative_prompt_embeds[0]
 
-    def post_denoising_loop(self, latents, batch):
+    def post_denoising_loop(self, latents, batch) -> torch.Tensor:
         return latents

@@ -15,7 +15,7 @@
 # Adapted from the Gemma3 text model implementation in this codebase.
 
 import logging
-from typing import Any, Iterable, Set, Tuple
+from typing import Any, Iterable
 
 import torch
 from torch import nn
@@ -208,8 +208,8 @@ class Gemma2Attention(nn.Module):
             "is_causal": False,
             "scale": self.scaling,
         }
-        if query.shape[1] != key.shape[1]:
-            attn_kwargs["enable_gqa"] = True
+        # Note: PyTorch SDPA handles GQA automatically based on tensor shapes
+        # No need for explicit enable_gqa parameter
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             query, key, value, **attn_kwargs
         )
@@ -288,11 +288,7 @@ class Gemma2DecoderLayer(nn.Module):
 
 
 class Gemma2Model(nn.Module):
-    """Gemma2 text encoder model for SANA pipeline.
-
-    This is a standalone text encoder (no vision components) that produces
-    hidden states from input tokens, used by SANA for text conditioning.
-    """
+    """Gemma2 text encoder for SANA pipeline."""
 
     _fsdp_shard_conditions = []
 
@@ -341,6 +337,12 @@ class Gemma2Model(nn.Module):
         output_hidden_states: bool | None = None,
         **kwargs,
     ) -> BaseEncoderOutput:
+        # Input validation - fail fast
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("Must provide either input_ids or inputs_embeds")
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("Cannot provide both input_ids and inputs_embeds")
+
         output_hidden_states = (
             output_hidden_states
             if output_hidden_states is not None
@@ -375,9 +377,9 @@ class Gemma2Model(nn.Module):
             hidden_states=all_hidden_states,
         )
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         stacked_params_mapping = getattr(
             self.config.arch_config, "stacked_params_mapping", None
