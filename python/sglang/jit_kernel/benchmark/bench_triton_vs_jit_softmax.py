@@ -72,6 +72,7 @@ except ImportError:
     print("[--] JIT kernel: NOT FOUND (skipping)")
 
 # --- FlashInfer baseline ---
+# Import can raise RuntimeError (e.g. flashinfer vs flashinfer-cubin version mismatch).
 try:
     from flashinfer.sampling import softmax as flashinfer_softmax
 
@@ -80,6 +81,13 @@ try:
 except ImportError:
     flashinfer_softmax = None  # type: ignore
     print("[--] FlashInfer: NOT FOUND (skipping)")
+except RuntimeError as e:
+    flashinfer_softmax = None  # type: ignore
+    print("[--] FlashInfer: skipped —", e)
+    print(
+        "    Fix: pip install matching `flashinfer` and `flashinfer-cubin`, or set "
+        "FLASHINFER_DISABLE_VERSION_CHECK=1 (not recommended for production)."
+    )
 
 print()
 
