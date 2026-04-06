@@ -18,6 +18,9 @@ Alternative setups (other branches / copies):
 
   Option C) ``pip install -e .`` from a tree that contains both kernels under
     ``jit_kernel/triton/`` and ``jit_kernel/softmax.py`` (this repo).
+
+Default sweeps **vocab** ``{32000, 65536, 128256, 151936, 262144}`` × **batch**
+``{1,2,4,8,16,32,64,128,256,512}`` (50 configs). Use ``--quick`` for a tiny subset.
 """
 
 from __future__ import annotations
@@ -122,29 +125,15 @@ def benchmark_fn(fn: Callable[[], None], warmup: int = 50, iters: int = 200) -> 
 # Benchmark configs
 # ============================================================================
 
+# Full grid: vocab × batch_size (5 × 10 = 50 configs), matching common sweep tables.
+_BENCH_DTYPE = torch.bfloat16
+_BENCH_VOCAB_SIZES = (32000, 65536, 128256, 151936, 262144)
+_BENCH_BATCH_SIZES = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512)
+
 CONFIGS = [
-    # (batch_size, vocab_size, dtype)
-    # Small vocab (single-pass for Triton)
-    (1, 32000, torch.bfloat16),
-    (8, 32000, torch.bfloat16),
-    (32, 32000, torch.bfloat16),
-    (64, 32000, torch.bfloat16),
-    (128, 32000, torch.bfloat16),
-    (256, 32000, torch.bfloat16),
-    (512, 32000, torch.bfloat16),
-    # Large vocab (multi-pass for Triton, split for JIT)
-    (1, 128256, torch.bfloat16),
-    (8, 128256, torch.bfloat16),
-    (32, 128256, torch.bfloat16),
-    (64, 128256, torch.bfloat16),
-    (128, 128256, torch.bfloat16),
-    (256, 128256, torch.bfloat16),
-    (512, 128256, torch.bfloat16),
-    # Very large vocab
-    (1, 151936, torch.bfloat16),
-    (32, 151936, torch.bfloat16),
-    (128, 151936, torch.bfloat16),
-    (512, 151936, torch.bfloat16),
+    (bs, vocab, _BENCH_DTYPE)
+    for vocab in _BENCH_VOCAB_SIZES
+    for bs in _BENCH_BATCH_SIZES
 ]
 
 
@@ -166,12 +155,9 @@ def main() -> None:
     configs = CONFIGS
     if args.quick:
         configs = [
-            (1, 32000, torch.bfloat16),
-            (32, 32000, torch.bfloat16),
-            (128, 32000, torch.bfloat16),
-            (1, 128256, torch.bfloat16),
-            (32, 128256, torch.bfloat16),
-            (128, 128256, torch.bfloat16),
+            (bs, vocab, _BENCH_DTYPE)
+            for vocab in (32000, 128256)
+            for bs in (1, 32, 128)
         ]
 
     gpu_name = torch.cuda.get_device_name(0)
