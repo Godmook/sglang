@@ -2057,6 +2057,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if self.device != "cuda":
             return
 
+        from sglang.jit_kernel.softmax import maybe_warmup_triton_fused_softmax
+
+        maybe_warmup_triton_fused_softmax(
+            vocab_size=self.model_config.vocab_size,
+            logits_dtype=self.model_config.dtype,
+            tp_group=get_tp_group(),
+        )
+
         if self._should_run_flashinfer_autotune():
             self._flashinfer_autotune()
 

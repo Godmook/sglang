@@ -5,7 +5,11 @@ import sys
 import pytest
 import torch
 
-from sglang.jit_kernel.softmax import softmax_sampling
+from sglang.jit_kernel.softmax import (
+    FUSED_SOFTMAX_BACKEND_ENV,
+    softmax_sampling,
+    triton_softmax_sampling,
+)
 from sglang.jit_kernel.utils import get_ci_test_range
 from sglang.test.ci.ci_register import register_cuda_ci
 
@@ -88,6 +92,39 @@ def test_softmax_math_properties(dtype: torch.dtype):
         **_tolerances(torch.float32),
     )
     assert torch.all(result >= 0), "All probabilities must be non-negative"
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_triton_softmax_matches_reference(dtype: torch.dtype):
+    """Fused Triton path matches PyTorch reference (single tile + dtypes)."""
+    triton = pytest.importorskip("triton")
+    del triton
+
+    batch_size, vocab_size = 32, 8192
+    torch.manual_seed(0)
+    logits = torch.randn(batch_size, vocab_size, dtype=dtype, device=DEVICE)
+    temperatures = torch.rand(batch_size, dtype=torch.float32, device=DEVICE)
+    temperatures.clamp_(0.001, 2.0)
+
+    expected = _ref_softmax(logits, temperatures)
+    result = triton_softmax_sampling(logits, temperatures)
+    torch.testing.assert_close(result, expected, **_tolerances(dtype))
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_softmax_sampling_env_triton_matches_reference(dtype: torch.dtype, monkeypatch):
+    """``SGLANG_FUSED_SOFTMAX_BACKEND=triton`` selects Triton inside ``softmax_sampling``."""
+    pytest.importorskip("triton")
+    monkeypatch.setenv(FUSED_SOFTMAX_BACKEND_ENV, "triton")
+
+    batch_size, vocab_size = 16, 4096
+    torch.manual_seed(1)
+    logits = torch.randn(batch_size, vocab_size, dtype=dtype, device=DEVICE)
+    temperatures = torch.ones(batch_size, dtype=torch.float32, device=DEVICE)
+
+    expected = _ref_softmax(logits, temperatures)
+    result = softmax_sampling(logits, temperatures)
+    torch.testing.assert_close(result, expected, **_tolerances(dtype))
 
 
 if __name__ == "__main__":
