@@ -136,9 +136,10 @@ void softcap_inplace(tvm::ffi::TensorView tensor, float softcap_const) {
   using namespace host;
   SymbolicSize N = {"num_elements"};
   SymbolicDevice device_;
+  device_.set_options<kDLCUDA>();
   TensorMatcher({N})
       .with_dtype<T>()
-      .with_device<kDLCUDA>(device_)
+      .with_device(device_)
       .verify(tensor);
   const int64_t n = static_cast<int64_t>(N.unwrap());
   if (n == 0) return;
@@ -174,13 +175,14 @@ void softcap_out_fp32(
   using namespace host;
   SymbolicSize N = {"num_elements"};
   SymbolicDevice device_;
+  device_.set_options<kDLCUDA>();
   TensorMatcher({N})
       .with_dtype<T>()
-      .with_device<kDLCUDA>(device_)
+      .with_device(device_)
       .verify(input);
   TensorMatcher({N})
       .with_dtype<fp32_t>()
-      .with_device<kDLCUDA>(device_)
+      .with_device(device_)
       .verify(output);
   const int64_t n = static_cast<int64_t>(N.unwrap());
   if (n == 0) return;
