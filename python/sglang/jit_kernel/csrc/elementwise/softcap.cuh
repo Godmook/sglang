@@ -196,11 +196,13 @@ void softcap_out_fp32(
       .inv_c = 1.0f / softcap_const,
   };
 
-  static const uint32_t max_occ = runtime::get_blocks_per_sm(kernel, kBlockSize);
-  static const uint32_t num_sm  = runtime::get_sm_count(dev.device_id);
-  const size_t needed = std::max<size_t>(
+  // For streaming out-of-place kernels, launch the full grid rather than
+  // capping at max_occ * num_sm.  This preserves sequential access patterns
+  // across both the input and output memory streams, enabling the hardware
+  // prefetcher to work effectively.  (Grid-stride loops with few blocks
+  // create multi-MB strides that defeat prefetching on the two streams.)
+  const size_t grid = std::max<size_t>(
       1, div_ceil(static_cast<size_t>(n / kVecSize), static_cast<size_t>(kBlockSize)));
-  const size_t grid = std::min<size_t>(needed, static_cast<size_t>(max_occ * num_sm));
 
   LaunchKernel(static_cast<unsigned>(grid), kBlockSize, dev)
       .enable_pdl(kUsePDL)(kernel, params);
