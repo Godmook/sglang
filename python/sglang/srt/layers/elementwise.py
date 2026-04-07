@@ -10,87 +10,64 @@ from sglang.srt.utils.custom_op import register_custom_op
 _is_hip = is_hip()
 
 
-fused_softcap_autotune = triton.autotune(
-    configs=[
-        triton.Config(kwargs={"BLOCK_SIZE": 128}, num_warps=4),
-        triton.Config(kwargs={"BLOCK_SIZE": 128}, num_warps=8),
-        triton.Config(kwargs={"BLOCK_SIZE": 128}, num_warps=16),
-        triton.Config(kwargs={"BLOCK_SIZE": 256}, num_warps=4),
-        triton.Config(kwargs={"BLOCK_SIZE": 256}, num_warps=8),
-        triton.Config(kwargs={"BLOCK_SIZE": 512}, num_warps=4),
-        triton.Config(kwargs={"BLOCK_SIZE": 512}, num_warps=8),
-        triton.Config(kwargs={"BLOCK_SIZE": 512}, num_warps=16),
-        triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_warps=4),
-        triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_warps=8),
-        triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_warps=16),
-        triton.Config(kwargs={"BLOCK_SIZE": 1024}, num_warps=32),
-        triton.Config(kwargs={"BLOCK_SIZE": 2048}, num_warps=32),
-        triton.Config(kwargs={"BLOCK_SIZE": 4096}, num_warps=32),
-        triton.Config(kwargs={"BLOCK_SIZE": 8192}, num_warps=32),
-        triton.Config(kwargs={"BLOCK_SIZE": 16384}, num_warps=32),
-        triton.Config(kwargs={"BLOCK_SIZE": 32768}, num_warps=32),
-    ],
-    key=["n_ele"],
-)
+# ---------------------------------------------------------------------------
+# Softcap: tanh(x / c) * c
+# NVIDIA CUDA  -> JIT kernel (vectorized CUDA, compiled once via tvm-ffi)
+# ROCm (HIP)   -> Triton kernel (kept as-is for AMD compatibility)
+# CPU / NPU    -> native PyTorch
+# ---------------------------------------------------------------------------
+
+if _is_hip:
+
+    @triton.jit
+    def _triton_softcap_kernel(
+        output_ptr,
+        input_ptr,
+        n_ele,
+        softcap_const: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(axis=0)
+        block_start = pid * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_ele
+        x = tl.load(input_ptr + offsets, mask=mask).to(tl.float32)
+        x = x / softcap_const
+        x = 2.0 * tl.sigmoid(2.0 * x) - 1.0
+        x = x * softcap_const
+        tl.store(output_ptr + offsets, x, mask=mask)
 
 
-@triton.jit
-def fused_softcap_kernel(
-    output_ptr,
-    input_ptr,
-    n_ele,
-    softcap_const: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_ele
-    x = tl.load(input_ptr + offsets, mask=mask)
-    fx = x.to(tl.float32)
-    fxs = fx / softcap_const
-    exped = tl.exp(2 * fxs)
-    top = exped - 1
-    bottom = exped + 1
-    output = top / bottom * softcap_const
-    tl.store(output_ptr + offsets, output, mask=mask)
+def softcap_inplace(tensor: torch.Tensor, softcap_const: float) -> None:
+    """In-place softcap (``tanh(x/c)*c``). Dispatches to JIT on NVIDIA, Triton on ROCm."""
+    if not _is_hip:
+        from sglang.jit_kernel.softcap import softcap_inplace as _jit_softcap_inplace
 
-
-fused_softcap_kernel_autotuned = fused_softcap_autotune(fused_softcap_kernel)
-
-
-def fused_softcap(x, softcap_const, autotune=False):
-    output = torch.empty_like(x, dtype=torch.float32)
-    n_elements = output.numel()
-    if autotune:
-        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-        fused_softcap_kernel_autotuned[grid](output, x, n_elements, softcap_const)
+        _jit_softcap_inplace(tensor, softcap_const)
     else:
-        fused_softcap_kernel[(triton.cdiv(n_elements, 128),)](
-            output, x, n_elements, softcap_const, BLOCK_SIZE=128, num_warps=8
+        n = tensor.numel()
+        block_size = 1024
+        grid = ((n + block_size - 1) // block_size,)
+        _triton_softcap_kernel[grid](
+            tensor, tensor, n, softcap_const, BLOCK_SIZE=block_size
         )
+
+
+def fused_softcap(x: torch.Tensor, softcap_const: float) -> torch.Tensor:
+    """Out-of-place softcap to float32. Dispatches to JIT on NVIDIA, Triton on ROCm."""
+    if not x.is_cuda:
+        return torch.tanh(x.float() / softcap_const) * softcap_const
+    output = torch.empty_like(x, dtype=torch.float32)
+    if not _is_hip:
+        from sglang.jit_kernel.softcap import softcap_out_fp32
+
+        softcap_out_fp32(x, output, float(softcap_const))
+    else:
+        n = output.numel()
+        block_size = 1024
+        grid = ((n + block_size - 1) // block_size,)
+        _triton_softcap_kernel[grid](output, x, n, softcap_const, BLOCK_SIZE=block_size)
     return output
-
-
-# cast to float + softcap
-class Softcap:
-    def __init__(self, softcap_const: float):
-        self.softcap_const = softcap_const
-
-    def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.is_cuda:
-            return self.forward_cuda(x)
-        else:
-            return self.forward_native(x)
-
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(x.float() / self.softcap_const) * self.softcap_const
-
-    def forward_cuda(self, x: torch.Tensor, autotune=False) -> torch.Tensor:
-        return fused_softcap(x, self.softcap_const, autotune=autotune)
 
 
 rmsnorm_autotune = triton.autotune(
