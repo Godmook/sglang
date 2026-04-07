@@ -103,19 +103,14 @@ void softcap_out_fp32_kernel(const SoftcapOutFP32Params __grid_constant__ p) {
     in_vec_t iv;
     iv.load(input, vid);
 
-    fp32_t results[kVecSize];
-#pragma unroll
-    for (int j = 0; j < kVecSize; ++j) {
-      results[j] = softcap_compute(device::cast<fp32_t>(iv[j]), p.inv_c, p.c);
-    }
-
     const int64_t out_base = vid * kVecSize / kFP32VecSize;
 #pragma unroll
     for (int ch = 0; ch < kOutChunks; ++ch) {
       out_vec_t ov;
 #pragma unroll
       for (int j = 0; j < kFP32VecSize; ++j) {
-        ov[j] = results[ch * kFP32VecSize + j];
+        ov[j] = softcap_compute(
+            device::cast<fp32_t>(iv[ch * kFP32VecSize + j]), p.inv_c, p.c);
       }
       ov.store(output, out_base + ch);
     }
