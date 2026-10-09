@@ -23,8 +23,10 @@ def _exaone_overrides(server_args: Any, hf_config: Any) -> dict:
         if resolving_view(server_args).attention_backend is None:
             if get_platform().is_cuda and get_platform().is_sm100:
                 overrides["attention_backend"] = "trtllm_mha"
-            elif get_platform().is_cuda and get_platform().device_sm >= 80:
+            elif get_platform().is_cuda and get_platform().is_sm90:
                 overrides["attention_backend"] = "fa3"
             else:
+                # On sm80 the fa3 build and flashinfer both mis-handle the
+                # sliding layers (measured on K-EXAONE); triton is correct.
                 overrides["attention_backend"] = "triton"
     return overrides
