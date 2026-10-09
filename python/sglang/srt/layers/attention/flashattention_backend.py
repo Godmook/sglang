@@ -283,7 +283,11 @@ class FlashAttentionBackend(AttentionBackend):
                 get_scheduler_metadata,
             )
 
-            self._get_scheduler_metadata = get_scheduler_metadata
+            # The tile-scheduler metadata exists only on Hopper; the sm80 build
+            # expects an empty tensor and rejects the precomputed buffer.
+            self._get_scheduler_metadata = (
+                get_scheduler_metadata if device_capability[0] == 9 else None
+            )
             self._get_fa_runtime_policy = None
         elif self.fa_impl_ver == 4:
             if device_capability[0] == 12:
