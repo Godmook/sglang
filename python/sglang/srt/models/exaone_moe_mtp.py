@@ -28,7 +28,11 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.models.exaone_moe import ExaoneMoEForCausalLM, ExaoneMoEModel
+from sglang.srt.models.exaone_moe import (
+    ExaoneMoEForCausalLM,
+    ExaoneMoEModel,
+    get_attention_sliding_window_size,
+)
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import add_prefix
 
@@ -54,7 +58,7 @@ class ExaoneMoEForCausalLMMTP(ExaoneMoEForCausalLM):
         )
         self.pre_fc_norm_hidden = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.model = ExaoneMoEModel(
-            config, quant_config, prefix=add_prefix("model", prefix)
+            config, quant_config, prefix=add_prefix("model", prefix), is_mtp=True
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -94,6 +98,11 @@ class ExaoneMoEForCausalLMMTP(ExaoneMoEForCausalLM):
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )
+
+    def get_attention_sliding_window_size(self) -> Optional[int]:
+        if self.config.mtp_layer_types[0] == "sliding_attention":
+            return get_attention_sliding_window_size(self.config)
+        return None
 
     def load_weights(
         self, weights: Iterable[Tuple[str, torch.Tensor]], is_mtp: bool = False
