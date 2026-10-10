@@ -47,6 +47,8 @@ class ExaoneMoEForCausalLMMTP(ExaoneMoEForCausalLM):
         config.num_hidden_layers = 1
         self.quant_config = quant_config
         self.pp_group = get_parallel().pp_group
+        # The head's MLP is dense, so nothing is fused into a routed kernel.
+        self.num_fused_shared_experts = 0
 
         self.fc = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False)
         self.pre_fc_norm_embedding = RMSNorm(
