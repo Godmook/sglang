@@ -1445,6 +1445,12 @@
                     ]
                   },
                   {
+                    "group": "LG AI Research",
+                    "pages": [
+                      "cookbook/autoregressive/LGAI/K-EXAONE"
+                    ]
+                  },
+                  {
                     "group": "Mistral",
                     "pages": [
                       "cookbook/autoregressive/Mistral/Ministral-3",

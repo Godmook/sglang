@@ -1,0 +1,135 @@
+---
+title: K-EXAONE
+description: "Deploy K-EXAONE 236B-A23B with SGLang — LG AI Research's Korean-English Mixture-of-Experts model with a 256K context and a bundled MTP drafter, verified on 16x A100 40GB."
+tag: NEW
+---
+
+## Deployment
+
+<a id="install" />
+
+<Accordion title="Install SGLang">
+
+For all methods and hardware platforms, see the [official SGLang installation guide](../../../docs/get-started/install). The two paths below match the **Python / Docker** toggle in the command panel.
+
+<Tabs>
+
+<Tab title="Python (pip / uv)">
+
+```bash Command
+pip install --upgrade pip
+pip install uv
+uv pip install --prerelease=allow sglang
+```
+
+Then run the **Python** output of the command panel below in that environment.
+
+</Tab>
+
+<Tab title="Docker">
+
+```bash Command
+docker pull lmsysorg/sglang:latest
+```
+
+For how to launch the image, see [Install → Method 3: Using Docker](../../../docs/get-started/install#method-3-using-docker). Substitute the inner `sglang serve ...` with what the command generator below produces.
+
+</Tab>
+
+</Tabs>
+
+</Accordion>
+
+Pick your hardware + recipe to generate the launch command. The verified recipe is the balanced operating point: one MTP draft token, which was the fastest setting at every concurrency measured on A100.
+
+import { Deployment } from "/src/snippets/_deployment.jsx";
+import { config }     from "/src/snippets/configs/LGAI-EXAONE/k-exaone.jsx";
+import { benchmarks } from "/src/snippets/configs/LGAI-EXAONE/k-exaone-benchmarks.jsx";
+
+<Deployment config={config} benchmarks={benchmarks} />
+
+## Playground
+
+The Playground is where you experiment with **SGLang features beyond the verified matrix**. The Deploy panel above only emits combinations that were measured; the Playground lets you turn on additional knobs on top of whichever cell the Deploy panel is currently showing.
+
+import { Playground } from "/src/snippets/_playground.jsx";
+
+<Playground config={config} />
+
+## 1. Model Introduction
+
+**K-EXAONE** is LG AI Research's Korean-English Mixture-of-Experts model: 236B total parameters with 23B active per token (128 routed experts, 8 active, plus one shared expert), 48 layers in a hybrid attention layout (three sliding-window layers of 128 tokens followed by one full-attention layer), a 262,144-token context, and a bundled Multi-Token Prediction head that SGLang uses as the speculative drafter. It ships under the K-EXAONE license (see the model card).
+
+<table style={{width: "100%", borderCollapse: "collapse", tableLayout: "fixed"}}>
+  <thead>
+    <tr style={{borderBottom: "2px solid #d55816"}}>
+      <th style={{textAlign: "left",  padding: "10px 12px", fontWeight: 700}}>Checkpoint</th>
+      <th style={{textAlign: "right", padding: "10px 12px", fontWeight: 700}}>Total / active params</th>
+      <th style={{textAlign: "left",  padding: "10px 12px", fontWeight: 700}}>Use</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style={{padding: "9px 12px"}}><strong><a href="https://huggingface.co/LGAI-EXAONE/K-EXAONE-236B-A23B">K-EXAONE-236B-A23B</a></strong></td>
+      <td style={{padding: "9px 12px", textAlign: "right"}}>236B / 23B</td>
+      <td style={{padding: "9px 12px"}}>BF16, the recipe above</td>
+    </tr>
+    <tr>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}><strong><a href="https://huggingface.co/LGAI-EXAONE/K-EXAONE-236B-A23B-FP8">K-EXAONE-236B-A23B-FP8</a></strong></td>
+      <td style={{padding: "9px 12px", textAlign: "right", backgroundColor: "rgba(255,255,255,0.02)"}}>236B / 23B</td>
+      <td style={{padding: "9px 12px", backgroundColor: "rgba(255,255,255,0.02)"}}>FP8 experts; Hopper and later</td>
+    </tr>
+  </tbody>
+</table>
+
+**Recommended generation:** `temperature=1.0`, `top_p=0.95` (from the model's generation config; informational, not hardcoded in the examples).
+
+**Resources:** [HuggingFace](https://huggingface.co/LGAI-EXAONE/K-EXAONE-236B-A23B).
+
+## 2. Configuration Tips
+
+- **Attention backend on A100.** Use `--attention-backend triton`. The FA3 build for sm80 and flashinfer under speculative decoding both mis-handle the sliding-window layers on this model (output degrades after about a hundred tokens); triton is the backend the recipe was verified with.
+- **MTP depth.** One draft token (`--speculative-num-steps 1 --speculative-num-draft-tokens 2`) was the fastest setting at concurrency 1, 4, 16 and 32 on A100. Deeper drafts raise the accept length (2.2 to 2.4 tokens) but lower throughput.
+- **Long context.** Thirty-six of the 48 layers only keep a 128-token window, so the hybrid SWA KV pool matters: the default `--swa-full-tokens-ratio 0.8` leaves most of the KV budget to the window pool. For long prompts (agent loops) set it to `0.3` or `0.1`; on the verified host that raised the full-attention KV capacity from 129K to 226K and 324K tokens with no change in accuracy or acceptance rate. The Playground exposes this knob.
+- **Prefix caching with MTP** works as expected: repeated prompts kept the same acceptance rate as cache-cold runs.
+- **Memory.** BF16 weights are 474GB, so a 40GB A100 host needs all 16 GPUs (`--tp 16`); the recipe leaves about 3.6GB per GPU for KV cache at `--mem-fraction-static 0.85`. `--cuda-graph-max-bs-decode 32` keeps batch sizes up to 32 on CUDA graphs; with the default of 16, larger batches decode eagerly and throughput drops by half.
+
+## 3. Advanced Usage
+
+### 3.1 Reasoning
+
+K-EXAONE thinks by default. Enable the `qwen3` reasoning parser (the recipe already does, or toggle **Reasoning Parser** in the **Parsers** card of the [Playground above](#playground)) to receive the thinking in `reasoning_content` and the answer in `content`. Pass `enable_thinking: false` through `chat_template_kwargs` to skip thinking.
+
+<Accordion title="Reasoning Example (Python)">
+
+```python Example
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:30000/v1", api_key="EMPTY")
+resp = client.chat.completions.create(
+    model="LGAI-EXAONE/K-EXAONE-236B-A23B",
+    messages=[{"role": "user", "content": "Janet's ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers market?"}],
+    max_tokens=400,
+)
+msg = resp.choices[0].message
+print("Reasoning:", msg.reasoning_content)
+print("Answer:", msg.content)
+```
+
+</Accordion>
+
+<Accordion title="Example Output">
+
+```text Output
+Reasoning: Okay, let's see. The problem is about Janet's ducks and how many eggs she sells at the farmers market. I need to figure out how much money she makes each day. Let's break it down step by step.
+First, the ducks lay 16 eggs per day. That's the total number of eggs she gets each day. Then, she eats three for breakfast every morning. So, out of the 16 eggs, she uses 3 for herself. Then, she bakes muffins for her friends every day with four eggs. So, she uses another 4 eggs for muffins. The remainder, which is what's left after she eats some and uses some for muffins, she sells at the farmers market. And she sells each egg for $2. So, I need to find out how many eggs are left after subtracting the ones she eats and the ones she uses for muffins, then multiply that number by $2 to get the daily earnings.
+Let me write that out. Total eggs per day: 16.
+Eggs eaten: 3.
+Eggs used for muffins: 4.
+So, eggs sold = total eggs - eggs eaten - eggs used for muffins.
+That would be 16 - 3 - 4. Let me calculate that. 16 minus 3 is 13, then 13 minus 4 is 9. So, she sells 9 eggs each day.
+Then, each egg is sold for $2, so the total money she makes is 9 * 2 = $18.
+Answer: Janet makes **$18** every day at the farmers market.
+```
+
+</Accordion>
