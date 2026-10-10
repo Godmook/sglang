@@ -2000,6 +2000,14 @@ class FlashInferIndicesUpdaterPrefill:
                     swa_paged_custom_mask = self._build_swa_prefix_custom_mask(
                         prefix_lens, seq_lens, effective_start
                     )
+                elif spec_info is not None and self._swa_kv_pool is None:
+                    # Spec verify reads KV from position 0 (its arg builder takes
+                    # no kv_start_idx) and its tree mask spans the whole
+                    # sequence, so a trimmed length would select the oldest
+                    # tokens; keep the full KV and let window_left mask it.
+                    paged_kernel_lens = seq_lens
+                    paged_kernel_lens_sum = seq_lens_sum
+                    kv_start_idx = seq_lens - paged_kernel_lens
                 else:
                     # window attention use paged only; the trim below is
                     # request-granular, exactness comes from plan-time window_left
@@ -2054,7 +2062,11 @@ class FlashInferIndicesUpdaterPrefill:
                 # mask, spec-verify keeps its tree mask
                 window_left=(
                     sliding_window_size
-                    if (wrapper_id == 0 and not use_ragged and spec_info is None)
+                    if (
+                        wrapper_id == 0
+                        and not use_ragged
+                        and (spec_info is None or self._swa_kv_pool is None)
+                    )
                     else -1
                 ),
                 plan=plan,
