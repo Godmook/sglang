@@ -63,6 +63,7 @@ from sglang.srt.model_executor.runner import get_is_capture_mode
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.runtime_context import get_exec, get_parallel, get_stream
 from sglang.srt.utils import LazyValue, add_prefix, is_cuda, make_pp_layers
+from sglang.srt.utils.hf_transformers.common import get_rope_config
 
 logger = logging.getLogger(__name__)
 
@@ -434,8 +435,12 @@ class ExaoneMoEDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.config = config
-        rope_theta = getattr(config, "rope_theta", 1000000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_theta, rope_scaling = get_rope_config(config)
+        if (
+            rope_scaling is not None
+            and rope_scaling.get("rope_type", "default") == "default"
+        ):
+            rope_scaling = None
         if rope_scaling is not None and getattr(
             config, "original_max_position_embeddings", None
         ):
