@@ -17,6 +17,7 @@
 """Inference-only ExaoneMoE model compatible with HuggingFace weights."""
 
 import logging
+import re
 from collections.abc import Iterable
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -49,7 +50,10 @@ from sglang.srt.layers.moe import get_moe_a2a_backend
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
-from sglang.srt.layers.moe.utils import RoutingMethodType
+from sglang.srt.layers.moe.utils import (
+    RoutingMethodType,
+    is_shared_experts_fusion_disabled,
+)
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import get_rope
@@ -140,6 +144,13 @@ class ExaoneMoESparseMoEBlock(nn.Module):
         self.alt_stream = alt_stream
 
         self.n_routed_experts = config.num_experts
+        # The shared expert has the routed experts' width, so it can ride the
+        # routed GEMM as one more expert with a fixed weight of one.
+        self.num_fused_shared_experts = (
+            0
+            if is_shared_experts_fusion_disabled()
+            else (config.num_shared_experts or 0)
+        )
 
         if self.tp_size > config.num_experts:
             raise ValueError(
@@ -160,18 +171,22 @@ class ExaoneMoESparseMoEBlock(nn.Module):
         )
 
         self.experts = get_moe_impl_class(quant_config)(
-            num_experts=config.num_experts + get_exec().moe.ep_num_redundant_experts,
-            top_k=config.num_experts_per_tok,
+            num_experts=config.num_experts
+            + get_exec().moe.ep_num_redundant_experts
+            + self.num_fused_shared_experts,
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            top_k=config.num_experts_per_tok + self.num_fused_shared_experts,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             layer_id=self.layer_id,
             quant_config=quant_config,
+            routed_scaling_factor=self.routed_scaling_factor,
             prefix=add_prefix("experts", prefix),
             routing_method_type=RoutingMethodType.RenormalizeNaive,
         )
 
         self.topk = TopK(
-            top_k=config.num_experts_per_tok,
+            top_k=config.num_experts_per_tok + self.num_fused_shared_experts,
             layer_id=self.layer_id,
             renormalize=config.norm_topk_prob,
             use_grouped_topk=True,
@@ -179,11 +194,20 @@ class ExaoneMoESparseMoEBlock(nn.Module):
             topk_group=config.topk_group,
             correction_bias=self.e_score_correction_bias,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scaling_factor_on_output=True,
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            apply_routed_scaling_factor_on_output=(
+                True
+                if self.num_fused_shared_experts == 0
+                else self.experts.should_fuse_routed_scaling_factor_in_topk
+            ),
+            fused_shared_experts_scaling_factor=(
+                1 if self.num_fused_shared_experts else None
+            ),
             scoring_func="sigmoid",
         )
 
-        if config.num_shared_experts is not None:
+        self.shared_experts = None
+        if config.num_shared_experts and self.num_fused_shared_experts == 0:
             intermediate_size = config.moe_intermediate_size * config.num_shared_experts
             self.shared_experts = ExaoneMoEMLP(
                 hidden_size=config.hidden_size,
@@ -213,8 +237,9 @@ class ExaoneMoESparseMoEBlock(nn.Module):
         ]
 
     def _forward_shared_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        shared_output = self.shared_experts(hidden_states)
-        return shared_output
+        if self.shared_experts is None:
+            return None
+        return self.shared_experts(hidden_states)
 
     def _forward_deepep(self, hidden_states: torch.Tensor, forward_batch: ForwardBatch):
         shared_output = None
@@ -244,7 +269,13 @@ class ExaoneMoESparseMoEBlock(nn.Module):
     def _forward_router_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
         router_logits, _ = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
-        return self.experts(hidden_states, topk_output)
+        out = self.experts(hidden_states, topk_output)
+        if (
+            self.num_fused_shared_experts
+            and not self.experts.should_fuse_routed_scaling_factor_in_topk
+        ):
+            out *= self.routed_scaling_factor
+        return out
 
     def forward_normal_dual_stream(
         self,
@@ -275,6 +306,7 @@ class ExaoneMoESparseMoEBlock(nn.Module):
 
         if (
             self.alt_stream is not None
+            and self.shared_experts is not None
             and hidden_states.shape[0] > 0
             and get_is_capture_mode()
         ):
@@ -642,6 +674,11 @@ class ExaoneMoEForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config)
         # For EAGLE3 support
         self.capture_aux_hidden_states = False
+        self.num_fused_shared_experts = (
+            0
+            if is_shared_experts_fusion_disabled()
+            else (config.num_shared_experts or 0)
+        )
 
         self._routed_experts_weights_of_layer = LazyValue(
             lambda: {
@@ -762,8 +799,14 @@ class ExaoneMoEForCausalLM(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
+            num_experts=self.config.num_experts + self.num_fused_shared_experts,
         )
+
+        if self.num_fused_shared_experts > 0:
+            # The shared expert loads as routed expert num_experts.
+            shared_re = re.compile(r"^(model\.layers\.\d+\.mlp\.)shared_experts\.")
+            fused_prefix = rf"\1experts.{self.config.num_experts}."
+            weights = ((shared_re.sub(fused_prefix, name), w) for name, w in weights)
 
         params_dict = dict(self.named_parameters())
 
@@ -847,6 +890,21 @@ class ExaoneMoEForCausalLM(nn.Module):
                         weight_loader(param, loaded_weight)
                     else:
                         logger.warning(f"Parameter {name} not found in params_dict")
+
+    @classmethod
+    def shared_experts_fusion_disable_reason(cls, hf_config, quant_config):
+        if not _is_cuda or torch.cuda.get_device_capability("cuda") < (8, 0):
+            return "Shared experts fusion needs an NVIDIA GPU with capability >= 80."
+        if getattr(hf_config, "num_shared_experts", None) != 1:
+            return "Shared experts fusion expects exactly one shared expert."
+        if get_parallel().moe_ep_size > 1:
+            return "Shared experts fusion is not supported under expert parallelism."
+        if get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mori():
+            return "Shared experts fusion is not supported with DeepEP / MoRI."
+        ignore = getattr(quant_config, "ignore", None) or []
+        if any(".shared_experts." in name for name in ignore):
+            return "Quantization keeps the shared experts at a higher precision."
+        return None
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):
