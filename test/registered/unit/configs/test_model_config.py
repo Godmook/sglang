@@ -44,12 +44,21 @@ class TestHybridLayerIds(CustomTestCase):
             "Gemma4ForConditionalGeneration",
             "LagunaForCausalLM",
             "MellumForCausalLM",
+            "ExaoneMoeForCausalLM",
         ):
             with self.subTest(architecture=architecture):
                 self.assertEqual(
                     get_hybrid_layer_ids([architecture], config),
                     ([0, 2], [1, 3]),
                 )
+
+    def test_exaone_moe_is_hybrid_only_with_sliding_layers(self):
+        from sglang.srt.configs.model_config import is_hybrid_swa_model
+
+        hybrid = SimpleNamespace(layer_types=["sliding_attention", "full_attention"])
+        dense = SimpleNamespace(layer_types=["full_attention", "full_attention"])
+        self.assertTrue(is_hybrid_swa_model(["ExaoneMoeForCausalLM"], hybrid))
+        self.assertFalse(is_hybrid_swa_model(["ExaoneMoeForCausalLM"], dense))
 
 
 class TestEmbeddingGemmaConfig(CustomTestCase):

@@ -1623,6 +1623,19 @@ class TestGoldenModelOverrides(_IsolatedPublish):
         self.assertTrue(self._resolved(sa, "disable_hybrid_swa_memory"))  # materialized
         self.assertTrue((self._publish(sa), self._leaf("disable_hybrid_swa_memory"))[1])
 
+    def test_exaone_moe_keeps_hybrid_swa_memory(self):
+        sa = self._construct(
+            "ExaoneMoeForCausalLM",
+            "llama",
+            config_extra={
+                "sliding_window_pattern": "LLLG",
+                "sliding_window": 128,
+                "layer_types": ["sliding_attention", "full_attention"],
+            },
+            attention_backend="triton",
+        )
+        self.assertFalse(self._resolved(sa, "disable_hybrid_swa_memory"))
+
     def test_exaone_without_pattern_declares_nothing(self):
         from sglang.srt.arg_groups.model_overrides.exaone import _exaone_overrides
 

@@ -128,6 +128,14 @@ def _resolve_eagle_aux_hidden_state(
         config.eagle_draft_swa_num_layers = len(
             draft_model_config.swa_attention_layer_ids
         )
+        # A bundled MTP head declares its own attention kinds (K-EXAONE).
+        mtp_layer_types = getattr(
+            draft_model_config.hf_text_config, "mtp_layer_types", None
+        )
+        if mtp_layer_types is not None:
+            config.eagle_draft_swa_num_layers = sum(
+                t == "sliding_attention" for t in mtp_layer_types
+            )
 
     if spec_algorithm.is_eagle3():
         config.eagle_use_aux_hidden_state = True

@@ -2559,6 +2559,13 @@ def is_hybrid_swa_model(
         "InklingForConditionalGenerationMTP",
         "UnlimitedOCRForCausalLM",
     }
+    if any(
+        arch in ("ExaoneMoEForCausalLM", "ExaoneMoeForCausalLM")
+        for arch in model_architectures
+    ):
+        # EXAONE MoE configs without a sliding pattern are full attention.
+        layer_types = getattr(hf_text_config, "layer_types", None) or []
+        return "sliding_attention" in layer_types
     if any(arch in hybrid_swa_archs for arch in model_architectures):
         # Only treat Laguna as hybrid SWA when it actually has a sliding window.
         if (
@@ -2637,6 +2644,8 @@ def get_hybrid_layer_ids(
         or "MellumForCausalLM" in model_architectures
         or "MuseGlimmerForCausalLM" in model_architectures
         or "MuseGlimmerForConditionalGeneration" in model_architectures
+        or "ExaoneMoEForCausalLM" in model_architectures
+        or "ExaoneMoeForCausalLM" in model_architectures
     ):
         layer_types = getattr(hf_text_config, "layer_types", [])
         swa_attention_layer_ids = [
