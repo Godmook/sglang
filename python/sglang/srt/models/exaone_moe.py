@@ -68,6 +68,16 @@ logger = logging.getLogger(__name__)
 
 _is_cuda = is_cuda()
 
+if _is_cuda:
+    from sglang.kernels.ops.attention.fused_qknorm_rope import (
+        can_use_fused_qk_norm_rope,
+        fused_qk_norm_rope,
+    )
+    from sglang.kernels.ops.layernorm.norm import (
+        can_use_fused_inplace_qknorm,
+        fused_inplace_qknorm,
+    )
+
 
 def get_attention_sliding_window_size(config: PretrainedConfig) -> int:
     # HF counts the query token inside the window; SGLang counts only the
@@ -394,6 +404,28 @@ class ExaoneMoEAttention(nn.Module):
             is_neox_style=rope_is_neox_style,
         )
 
+        # Sliding (roped) layers fuse QK-norm with RoPE; full layers are NoPE
+        # and fuse only the two norms. Both are opt-in like Qwen3-MoE.
+        fuse = (
+            _is_cuda
+            and get_exec().kernel.enable_fused_qk_norm_rope
+            and rope_scaling is None
+        )
+        self.use_fused_qk_norm_rope = (
+            fuse
+            and self.use_rope
+            and can_use_fused_qk_norm_rope(
+                self.head_dim, rope_is_neox_style, torch.bfloat16
+            )
+        )
+        self.use_fused_qknorm = (
+            fuse
+            and not self.use_rope
+            and can_use_fused_inplace_qknorm(self.head_dim, torch.bfloat16)
+        )
+        self.rope_theta = rope_theta
+        self.rope_is_neox_style = rope_is_neox_style
+
         self.attn = RadixAttention(
             self.num_heads,
             self.head_dim,
@@ -418,18 +450,47 @@ class ExaoneMoEAttention(nn.Module):
         if hidden_states.shape[0] == 0:
             return hidden_states
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.use_fused_qk_norm_rope and qkv.dtype == torch.bfloat16:
+            fused_qk_norm_rope(
+                qkv,
+                self.num_heads,
+                self.num_kv_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.q_norm.variance_epsilon,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.rope_theta,
+                self.rope_is_neox_style,
+                positions.view(-1).to(torch.int32).contiguous(),
+                1.0,
+                0,
+                0,
+                1.0,
+            )
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        elif self.use_fused_qknorm and qkv.dtype == torch.bfloat16:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            fused_inplace_qknorm(
+                q.view(-1, self.num_heads, self.head_dim),
+                k.view(-1, self.num_kv_heads, self.head_dim),
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.q_norm.variance_epsilon,
+            )
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q = q.reshape(-1, self.head_dim)
-        q = self.q_norm(q)
-        q = q.reshape(-1, self.num_heads * self.head_dim)
+            q = q.reshape(-1, self.head_dim)
+            q = self.q_norm(q)
+            q = q.reshape(-1, self.num_heads * self.head_dim)
 
-        k = k.reshape(-1, self.head_dim)
-        k = self.k_norm(k)
-        k = k.reshape(-1, self.num_kv_heads * self.head_dim)
+            k = k.reshape(-1, self.head_dim)
+            k = self.k_norm(k)
+            k = k.reshape(-1, self.num_kv_heads * self.head_dim)
 
-        if self.use_rope:
-            q, k = self.rotary_emb(positions, q, k)
+            if self.use_rope:
+                q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
